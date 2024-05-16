@@ -1,0 +1,596 @@
+---
+title: "Steps 0 to 6"
+author: "Anna Caderon"
+date: "5/9/2022"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r load-packages}
+library(tidyverse)
+library(tm)
+library(tidymodels)
+```
+
+```{r isolation-data, message=FALSE, warning=FALSE}
+
+# Ohio 
+geoiso <- read_csv("Data/GeoIso.csv",
+                   col_types = list(col_character()))
+
+# Wayne D. 
+processed_nytracts <- read_csv("Data/processed_nytracts.csv",
+                               col_types = list(col_character()))
+weight <- readRDS("Data/ny_join_wo_geo_2010.rds") |> 
+  mutate(cntyname = str_remove(cntyname," NY")) |> 
+  mutate(pop10 = as.numeric(pop10)) |> 
+  select(cntyname, GEOID10, pop10) |> 
+  group_by(cntyname) |> 
+  mutate(total_pop = sum(pop10)) |> 
+  ungroup() |> 
+  mutate(weight = pop10/total_pop) |> 
+  select(GEOID10,weight)
+  
+### new isolation 
+new_iso <- readRDS("ny_iso_2020.rds")
+
+geoiso <- new_iso |>
+  select(GEOID, log_density) |>
+  rename(IsoDist=log_density,
+         FIPS=GEOID)
+
+#geoiso
+
+## Average of all the tracts per county was calculated to aggregate by county. 
+county_iso <- processed_nytracts %>% 
+    filter(variable == "totalpop") |> 
+    select(GEOID, NAME) |> 
+    left_join(geoiso, by= c("GEOID"="FIPS")) %>% 
+    select(GEOID, NAME, IsoDist) %>% 
+    #distinct(GEOID, NAME, IsoDist) %>% 
+    left_join(weight, by = c("GEOID" = "GEOID10")) |> 
+    group_by(NAME) |> 
+  mutate(iso_wt = sum(IsoDist*weight, na.rm = T)) |> 
+  distinct(NAME, iso_wt)
+
+county_iso <- county_iso %>% 
+  mutate(NAME = sub(",.*", "", NAME)) %>% 
+  mutate(NAME = gsub(" County.*","",NAME)) %>% 
+  rename(county = NAME) 
+    
+# county_iso
+
+## new isolation
+iso <- readRDS("ny_iso_2020.rds")
+county_iso <- county_iso%>%
+  filter(county != "Bronx",
+         county != "Queens",
+         county != "Kings",
+         county != "New York",
+         county != "Richmond")
+county_iso 
+
+```
+
+
+
+# Total Population Data 
+For the proportion estimate we need the total population per county as the denominator. These files were obtained manually from https://wonder.cdc.gov/bridged-race-population.html. Each year needs to downloaded separately. 2019 from the 1990 - 2019 Data request link, 2018 from the 1990 - 2018, and so on. Files were saved in Prevalence/population.
+```{r population-data, warning=FALSE, message=FALSE}
+
+### POPULATION data extracted from CDC Wonder manually 
+pop17 <- read.csv("population/Bridged-Race Population Estimates 2017.csv")
+pop18 <- read.csv("population/Bridged-Race Population Estimates 2018.csv")
+pop19 <- read.csv("population/Bridged-Race Population Estimates 2019.csv")
+population <- rbind(pop17,pop18,pop19)
+
+### CLEANING 
+stopwords <- c(", NY", " County", " years")
+
+population <- population %>% 
+  select(County, Yearly.July.1st.Estimates, Gender, Age, Population) %>% 
+  rename(Year = Yearly.July.1st.Estimates,
+         Sex = Gender) %>% 
+  mutate(County = removeWords(County, stopwords),
+         Age = as.numeric(removeWords(Age, stopwords)),
+         Year = as.character(Year)) %>% 
+  mutate(Age = case_when(Age >= 18 & Age <= 34 ~ "18-34",
+                         Age >= 35 & Age <= 54 ~ "35-54",
+                         Age >= 55 & Age <= 64 ~ "55-64",
+                         TRUE ~ "other")) %>% 
+  group_by(County, Year, Sex, Age) %>% 
+  summarise(Pop = sum(Population)) %>% 
+  ungroup() %>% 
+  na.omit() %>% 
+  rename(Population = Pop) %>% 
+  filter(County !="New York"&
+           County !="Bronx"&
+           County !="Kings"&
+           County !="Queens"&
+           County !="Richmond") %>% 
+  rename(Community = County)
+  
+population
+
+```
+
+
+```{r Medicaid-data, warning=FALSE, error=FALSE, message=FALSE}
+Medicaid <- read_csv("Data/Prevalence_CY2017_CY2019_v16_1.csv")
+
+# Exploring St. Lawrence
+# dealing with St. Lawrence issue. Some records have saint laurence 
+# other records have St. Lawrence
+medi_sl <- Medicaid %>% 
+  select(MeasureID:HCS_raceEthnicity, Numerator, Denominator) %>% 
+  filter(Mbr_Res_County_Desc == "Saint Lawrence" | Mbr_Res_County_Desc == "St. Lawrence") %>% 
+  mutate(Mbr_Res_County_Desc = ifelse(Mbr_Res_County_Desc == "Saint Lawrence", 
+                                      "St. Lawrence", Mbr_Res_County_Desc)) %>% 
+  select(MeasureID, Mbr_Res_County_Desc, Year, HCS_age, HCS_sex, 
+            HCS_raceEthnicity)
+duplicated_combo <- medi_sl[duplicated(medi_sl) | duplicated(medi_sl,fromLast = TRUE),]
+
+
+# changing NAs to unknown. 
+Medicaid <- Medicaid %>%
+  mutate(Mbr_Res_County_Desc = ifelse(is.na(Mbr_Res_County_Desc), 
+                                      "Unknown", 
+                                      Mbr_Res_County_Desc))
+
+# there should be 310 rows for St. Lawrence (347-37(wrong spelling))
+medi_sl <- Medicaid %>% 
+  select(MeasureID:HCS_raceEthnicity, Numerator, Denominator) %>% 
+  filter(Mbr_Res_County_Desc == "Saint Lawrence" | Mbr_Res_County_Desc == "St. Lawrence") %>% 
+  mutate(Mbr_Res_County_Desc = ifelse(Mbr_Res_County_Desc == "Saint Lawrence", 
+                                      "St. Lawrence", Mbr_Res_County_Desc)) %>% 
+  group_by(MeasureID, Mbr_Res_County_Desc, Year, HCS_age, HCS_sex, 
+            HCS_raceEthnicity) %>% 
+  summarise(Numerator = sum(Numerator), Denominator = sum(Denominator))
+
+medi_rest <- Medicaid %>% 
+  select(MeasureID:HCS_raceEthnicity, Numerator, Denominator) %>% 
+  filter(Mbr_Res_County_Desc != "Saint Lawrence") %>% 
+  filter(Mbr_Res_County_Desc != "St. Lawrence")
+
+# Medicaid1-- removed "Unknown" here and joined "St. Lawrence" and "Saint Lawrence" above
+Medicaid1 <- rbind(medi_sl, medi_rest)
+
+
+#fixing the empty values for race/eth
+# assuming " " means unknown for race/eth
+# Age: level "55+" will be changed to "55-64"
+
+Medicaid2 <- Medicaid1 %>% 
+  select(MeasureID:HCS_raceEthnicity, Numerator, Denominator) %>% 
+  filter(Mbr_Res_County_Desc !="Unknown" & 
+           Mbr_Res_County_Desc !="Bronx"&
+           Mbr_Res_County_Desc !="Kings"&
+           Mbr_Res_County_Desc !="New York"&
+           Mbr_Res_County_Desc !="Queens"&
+           Mbr_Res_County_Desc !="Richmond"&
+           Mbr_Res_County_Desc !="Brookhaven Township"&
+           Mbr_Res_County_Desc !="Buffalo"&
+           Mbr_Res_County_Desc !="Rochester") %>% 
+  mutate(HCS_raceEthnicity = ifelse(HCS_raceEthnicity == "", 
+                                      "MISSING", HCS_raceEthnicity)) %>% 
+  mutate(HCS_age = ifelse(HCS_age == "55+",
+                          "55-64", HCS_age)) %>% 
+  mutate(Year = substr(Year, nchar(Year) - 4 + 1, nchar(Year))) %>%  
+  rename(Community =Mbr_Res_County_Desc,
+         Age = HCS_age, 
+         Sex = HCS_sex,
+         Race_Ethnicity = HCS_raceEthnicity) %>% 
+  mutate(Sex = str_to_title(Sex),
+         Race_Ethnicity = str_to_title(Race_Ethnicity))
+
+#sort(unique(Medicaid$Mbr_Res_County_Desc))
+
+# individuals receiving MOUD - includes buprenorphine
+# Denominator is the real OUD measure 
+oud_moud <- Medicaid2 %>% 
+  filter(MeasureID == "2.5.4") %>% 
+  select(Community:Sex, Numerator, Denominator) %>% 
+  group_by(Community, Year, Age, Sex) %>% 
+  summarise(num_sum = sum(Numerator), den_sum=sum(Denominator)) %>% 
+  rename(`medi_MOUD` = num_sum,
+         Denominator = den_sum) 
+  #arrange(Community, Year, Age, Sex)
+
+
+#missing data in these groups should be 0 
+# total of 4 missing groups 
+templete_sex <- readRDS("templete_sex.rds")
+missing_data254 <- anti_join(templete_sex, oud_moud[,1:4])
+
+# double checked if denominator(ouds) should be 0 too. 2.5.4 has 0s 
+missing_data254 <- missing_data254 %>% 
+  mutate(medi_MOUD = rep(0)) %>% 
+  mutate(Denominator = rep(0)) %>% 
+  mutate(Year = as.character(Year))
+
+oud_moud <- rbind(oud_moud,missing_data254)
+
+oud_moud <- oud_moud %>% 
+    rename(medi_OUD = Denominator)
+
+
+# NEXT MEASURE 
+
+# individuals receiving buprenorphine as treatment 
+# this is the only measure in the PDPM dataset
+
+oud_tx_b1 <- Medicaid2 %>% 
+  filter(MeasureID == "2.5.5") %>% 
+  select(Community:Sex, Numerator) %>% 
+  group_by(Community, Year, Age, Sex) %>% 
+  summarise(num_sum = sum(Numerator)) %>%
+  # mutate(prop_tx = round((num_sum/den_sum), 2)) %>% #proportion over medicaid pop
+  ungroup() %>% 
+  rename(medi_bup = num_sum) 
+  #arrange(Community, Year, Age, Sex)
+
+# missing data in these groups should be 0
+# because if there are no cases in a specific strata combo 
+# Medicaid doesn't keep a records of it
+missing_data255 <- anti_join(templete_sex, oud_tx_b1[,1:4])
+
+missing_data255 <- missing_data255 %>% 
+  mutate(medi_bup = rep(0)) %>% 
+  mutate(Year = as.character(Year))
+
+oud_tx_b1 <- rbind(oud_tx_b1,missing_data255)
+
+medicaid_clean <- oud_tx_b1 %>% 
+  left_join(oud_moud, by = c("Community", "Year", "Age", "Sex")) %>%
+  # there are some num = 0 and den = 0, creating NANs - therefore line below
+  mutate(medi_OUD = ifelse(
+    medi_bup == 0 & medi_OUD == 0, 0.5, medi_OUD)) %>% 
+  mutate(prop_bup_medi = medi_bup/medi_OUD) # numerator in step 2
+medicaid_clean
+```
+
+```{r pdmp-data}
+PDMP <- read_csv("Data/EnhancedStratification_PMP_17_20 (1).csv")
+# Number of individuals receiving buprenorphine products 
+# that are FDA approved for treatment of OUD (H3) 2.5.1
+
+# general population # denominator 
+# number of individuals with OUD and receive treatments
+PDMP1 <- PDMP %>% 
+  select(Community, Year, Age, Gender, Numerator, Denominator) %>% 
+  rename(Sex = Gender) %>% 
+  filter(Age !="Missing") %>% 
+  filter(Age !="65+") %>% 
+  filter(Sex != "Missing") %>% 
+  mutate(Sex = case_when(
+    Sex == "F"~ "Female",
+    Sex == "M"~ "Male"
+  )) %>% 
+  filter(Community !="Unknown" & 
+           Community !="Bronx"&
+           Community !="Kings"&
+           Community !="New York"&
+           Community !="Queens"&
+           Community !="Richmond"&
+           Community !="Brookhaven Township"&
+           Community !="Buffalo"&
+           Community !="Rochester"&
+           Community != "New York State") %>% 
+  filter(Year != "2020") %>% 
+  group_by(Community, Year, Sex, Age) %>% 
+  summarise(Numerator = sum(Numerator), Denominator = sum(Denominator)) %>% 
+  ungroup() %>% 
+  mutate(Year = as.character(Year))
+
+PDMP1
+```
+# Data preparation 
+## A matrix was created with every possible true/false combination of the stratification variables. Interaction between all variables were calculated using the model.matrix() function.
+```{r}
+
+# 8 potential T/F combinations for the 3 variables
+age35_54 <- c(0,0,1,1,0,0)
+age55_64 <- c(0,0,0,0,1,1)
+sexM <-     c(0,1,0,1,0,1)
+
+df <- data.frame(age35_54, age55_64, sexM)
+
+# creating combinations for every county (62 counties)
+df <- df %>% 
+  slice(rep(1:n(),57))
+
+# repeat the 62 counties x6 (number of possible combinations)
+m <- mean(county_iso$iso_wt)
+sd <- sd(county_iso$iso_wt)
+temp_matrix1 <- county_iso %>% 
+  mutate(iso_norm = (iso_wt-m)/(4*sd)) %>%
+  slice(rep(1:n(),6)) |> 
+  filter(county != "Bronx",
+         county != "Queens",
+         county != "Kings",
+         county != "New York",
+         county != "Richmond")
+temp_matrix1 <- cbind(temp_matrix1,df)
+
+# create interactions 
+temp_matrix2 <- model.matrix(~age35_54*age55_64*sexM*iso_norm, temp_matrix1)
+# Dropping the combinations that do not make sense. 
+# For example, age35_54:age55_64:sexM
+temp_matrix3 <- temp_matrix2[,c(1:5, 7:11, 14:15)]
+
+head(data.frame(temp_matrix3))
+```
+
+
+## Below are the average of the gamma values. One value per column.
+```{r message=FALSE}
+gamma_matrix <- read_csv("Data/gamma_for_NY(60).csv")
+means <- colMeans(gamma_matrix)
+
+gammas_mean <- matrix(means)
+gammas_mean
+```
+
+## The matrix containing the average of the gamma values was multiplied with the previous matrix. This is the denominator of Step 1 to calculate the n_NT.
+```{r}
+# product between gamma mean and the design matrix
+matrix_prod <- temp_matrix3%*%gammas_mean
+head(matrix_prod, 15)
+
+```
+
+## Stratification data. We have this data for 61 counties. Measure 1, OD opioid deaths counts. 
+```{r}
+strat <- read_csv("Data/EnhancedStratification_VR_17_20.csv")
+
+strat <- strat %>%
+  select(-MeasureID)
+
+strat[order(strat$Community, strat$Year, strat$Age),]
+```
+## For now, we will ignore the "missing" level in gender and "65+" in Age as they were not taken into account in the Matrix. It can easily be added. We are also aggregating over race/ethnicity.
+```{r}
+strat1 <- strat %>%
+  select(-Denominator, -IsSuppressed) %>%
+  subset(Gender!='"Gender":"Missing"') %>%
+  subset(Age!='"Age":"65+"') %>%
+  group_by(Community, Year, Age, Gender) %>%
+  summarise(across(Numerator, sum)) %>%
+  ungroup()
+
+strat2 <- strat1 %>%
+  mutate(Age = gsub('"', '', Age)) %>%
+  mutate(Age = gsub(".*:","",Age)) %>%
+  mutate(Gender = gsub('"', '', Gender)) %>%
+  mutate(Gender = gsub(".*:","",Gender))
+strat2
+
+deaths_clean <- strat2 %>%
+  mutate(Year= as.character(Year)) %>%
+  filter(Community !="Bronx"&
+           Community !="Kings"&
+           Community !="New York"&
+           Community !="Queens"&
+           Community !="Richmond"&
+           Community !="Brookhaven"& # Suffolk
+           Community !="Buffalo"&  # Erie
+           Community !="Rochester"& # part of Monrore
+           Community !="ROS Total") %>% # rest of the state
+  filter(Year != 2020) %>%
+  rename(Sex = Gender)
+
+#write_rds(deaths_clean, "Data/deaths_clean.Rds")
+```
+
+## Now we make dummy variables for age and gender. We also remove communities Buffalo, Brookhaven, Rochester, and ROS Total.
+
+```{r}
+
+rec <- strat2 %>%
+  recipe(Numerator ~.) %>%
+  step_dummy(Age,Gender) %>%
+  prep()
+strat3 <- bake(rec, new_data = NULL)
+
+strat3 <- strat3 %>%
+  filter(Community!="Buffalo" &
+           Community!="Brookhaven" &
+           Community!="Rochester" &
+           Community!="ROS Total") %>%
+  rename('age35_54' = Age_X35.54, 'age55_64' = Age_X55.64, county = Community,
+         year = Year, numerator = Numerator, sexM = Gender_Male) %>%
+  ungroup()
+
+strat3$county <- as.character(strat3$county)
+strat3
+
+
+
+```
+
+## We join the design matrix to the lambda values.
+```{r}
+results_data <- cbind(temp_matrix1,matrix_prod)
+results_data <- results_data %>% 
+  rename(lambda= ...7) %>% 
+  ungroup()
+results_data
+```
+## Repeate everything by the number of years available in the stratification file. By 4 Years (2017-2020).
+```{r}
+
+results_data2 <- results_data %>%
+  slice(rep(1:n(), times = 3))
+
+results_data2 <- results_data2[order(results_data2$county),]
+
+results_data2 <- results_data2 %>% 
+  mutate(year = rep(c(2017:2019), each = 6, times = 57))
+
+
+results_data3 <- results_data2 %>%
+  rename(Community=county) %>%
+  mutate(Sex = ifelse(sexM==1,"Male","Female"),
+         Age = ifelse(age35_54==1,"35-54",ifelse(age55_64==1,"55-64","18-34")),
+         Year = as.character(year),
+         lambda = exp(lambda))%>%
+  select(Community,Year,Sex,Age,iso_wt,iso_norm,lambda)
+
+results_data3
+
+#saveRDS(res_data,file = "/Users/jsx/Desktop/iso_norm/iso_norm_data.rds")
+```
+## Joining stratification to lambdas
+
+```{r}
+results_data4 <- strat3 %>% 
+  rename(Community=county) %>%
+  mutate(Sex = ifelse(sexM==1,"Male","Female"),
+         Age = ifelse(age35_54==1,"35-54",ifelse(age55_64==1,"55-64","18-34")),
+         Year = as.character(year)) |> 
+  select(-age35_54, -age55_64, -sexM, -year) |> 
+  left_join(results_data3, by = c("Community", "Age", "Sex", "Year")) %>% 
+  rename(od_deaths = numerator) %>% 
+  select(-iso_wt)
+
+results_data4
+```
+
+# STEP 1
+## Using the formula in step 1, we calculate not treated deaths.
+## est_num_untreated_oud = od_deaths/lambda
+## est_prop_untreated_oud = od_deaths/lambda
+```{r}
+options(scipen=999)
+step1_results <- results_data4 %>% 
+  left_join(population, by = join_by(Community, Sex, Age, Year)) |> 
+  left_join(medicaid_clean, by = join_by(Community, Sex, Age, Year)) |> 
+  mutate(est_num_untreated_oud = (od_deaths/lambda) - (0.25 * medi_bup)) %>% 
+  mutate(est_num_untreated_oud = ifelse(est_num_untreated_oud>Population,Population,est_num_untreated_oud)) %>%
+  mutate(est_num_untreated_oud = ifelse(est_num_untreated_oud<0,0,est_num_untreated_oud)) %>%
+  filter(Year != "2020") |> 
+  mutate(est_prop_untreated_oud = est_num_untreated_oud/Population) 
+
+# final_results 
+step1_results
+
+# saveRDS(final_results, "Results/step1_results_final.rds")
+
+# add the proportion of untreated oud number = oud/pop 
+```
+
+# Step 2 - Estimations
+## Estimated number of diagnosed OUDs, not in Medicaid = (pdmp_b/prop_treated_medicaid)- num_oud_medi
+## People treated with Bup / Proportion MOUD in Medicaid 
+```{r step2-estimations}
+# calculated in medicaid data cleaning. This is real data.
+# prop_bup_medi = prop_bup_medi/medi_OUD
+
+# Estimation
+step2_results <- PDMP1 %>% 
+  select(-Denominator) %>% # we only need the count, not population 
+  rename(pdmp_bup = Numerator) %>% 
+  left_join(step1_results, by = c("Community", "Year", "Sex", "Age")) %>% 
+  #medicaid and pdmp have treatments 
+  mutate(pdmp_bup = ifelse(pdmp_bup < medi_bup, medi_bup, pdmp_bup)) |> 
+  #select(-medi_MOUD, - medi_bup) %>% 
+  # HELP - prop_bup_medi (den) is 0 sometimes making inf values for est_num_oud_nm
+  # prop_bup_medi = medicaid bup/ medicaid OUD
+  # there are 0 in people treated with bup(num) making props = 0 
+  # ** this was the solution - change 0 den to a small number
+  mutate(prop_bup_medi = ifelse(
+    prop_bup_medi == 0, 0.01, prop_bup_medi
+  )) %>% 
+  mutate(part1 = pdmp_bup/prop_bup_medi) |> 
+  # est_num_oud_nm is being rounded because the estimation the default is 
+  # giving a very small negative num in scientific notation for 1 case. 
+  mutate(est_num_oud_nm = 
+           round((part1 - medi_OUD), 8)) %>% 
+  # there are still some negative values -- solution: make them 0
+  mutate(est_num_oud_nm = ifelse(est_num_oud_nm <0, 0, est_num_oud_nm)) |> 
+  #left_join(population, by = c("Community", "Year", "Sex", "Age")) %>% 
+  rename(total_pop = Population) %>% 
+  mutate(est_prop_oud_nm = est_num_oud_nm/total_pop) %>% 
+  #select(Community:Age, est_num_oud_nm, est_prop_oud_nm) |> 
+  mutate(num_bup_medi = medi_OUD*prop_bup_medi) |> 
+  select(-part1) 
+  #select(Community:Age, iso_norm, lambda, od_deaths:total_pop, medi_OUD:)
+
+step2_results
+#saveRDS(step2_results, "Results/step2_results.rds")
+
+```
+# Step 3
+Estimated Number of OUDs, not in Medicaid, Not treated.
+est_num_oud_nm_nt = est_num_oud_nm*(1-prop_moud_medi)
+
+
+```{r step3-prep}
+# if negative make it 0 
+step3_results <- step2_results %>% 
+  #select(Community:Age, est_num_oud_nm) %>% 
+  #left_join(medicaid_s2, by = join_by(Community, Year, Sex, Age)) %>% 
+  #select(-medi_bup, -prop_bup_medi) %>% 
+  mutate(prop_moud_medi = medi_MOUD/medi_OUD) %>% 
+  mutate(est_num_oud_nm_nt = est_num_oud_nm*(1-prop_moud_medi))
+
+step3_results
+#saveRDS(step3_results, "Results/step3_results.rds")
+```
+
+# Step 4
+Estimated number of individuals who are undiagnosed OUD among total population.
+
+est_num_undiagnosed_oud = est_num_untreated_oud - est_num_oud_nm_nt - (medi_OUD * (1-prop_moud_medi))
+
+est_prop_undiagnosed_oud = est_num_undiagnosed_oud/Population
+```{r}
+
+step4_results <- step3_results %>%
+  # estimate 1
+  mutate(est_num_undiagnosed_oud = est_num_untreated_oud - est_num_oud_nm_nt - (medi_OUD *(1-prop_moud_medi))) %>%
+  left_join(population, by = c("Community", "Year", "Sex", "Age")) %>%
+  # estimate 2
+  mutate(est_num_undiagnosed_oud = ifelse(est_num_undiagnosed_oud<0,0,est_num_undiagnosed_oud)) %>%
+  mutate(est_prop_undiagnosed_oud = est_num_undiagnosed_oud/Population)
+  #select(Community:Age, est_num_undiagnosed_oud, est_prop_undiagnosed_oud)
+
+step4_results
+#saveRDS(step4_results, "Results/step4_results.rds")
+  
+```
+
+# Step 5 
+## the proportion of OUD in stratum k in county i
+
+prop_medi_oud =( medi_OUD + est_num_oud_nm + est_num_undiagnosed_oud)/Population))
+```{r} 
+step5_results <- step4_results |> 
+  mutate(prop_medi_oud = medi_OUD/Population) |> 
+  mutate(prop_overall_oud = prop_medi_oud + est_prop_undiagnosed_oud + 
+           est_prop_oud_nm)
+
+step5_results
+
+#saveRDS(step5_results, "Results/step0-5results_new.rds")
+```
+
+
+# Step 6 
+## Aggregated over strata, compute for each county
+
+```{r}
+step6_results <- step5_results |> 
+  group_by(Community, Year) |>
+  summarise(prop_oud = sum(prop_overall_oud*total_pop)/sum(total_pop),population=sum(total_pop))
+
+saveRDS(step6_results, "Results/step6results_new.rds")
+```
+
+
+
+
+
