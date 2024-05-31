@@ -1,0 +1,148 @@
+---
+title: "Sensitivity analysis with rr and p^To"
+output:
+  html_notebook: default
+---
+
+-   step 1: $$\hat{\lambda}^{(NT)}_{ik} = e^{(\beta w_{ik}+\theta)}$$
+
+-   step 2: Assumption: $\tau^{(D,M,Tb)}_{ik} =\tau^{(D,NM,Tb)}_{ik}=\tau^{(Tb)}_{ik}$ $$\hat{n}_{ik}^{(D, NM)}=\hat{p}_{ik}^{(D, NM)}\times N_{ik} = \frac{n_{ik}^{(Tb)}}{\tau_{ik}^{(Tb)}} - n_{ik}^{(D,M)}$$
+
+-   step 3: Assumption: $\tau^{(D,M,To)}_{ik} =\tau^{(D,NM,To)}_{ik}=\tau^{(To)}_{ik}$ $$\hat{p}^{(To)}_{ik} = \frac{\hat{n}^{(To)}_{ik}}{N_{ik}} = (p^{(D,M)}_{ik}+\hat{p}_{ik}^{(D, NM)})\times \tau^{(To)}_{ik}$$
+
+-   step 4: $$\hat{p}_{ik}^{(NT)}=\frac{n^{(OD,F)}_{ik}-n^{(Tb)}_{ik}\times \hat{\lambda}^{(NT)}_{ik}\times rr - \hat{n}^{(To)}_{ik}\times \hat{\lambda}^{(NT)}_{ik}\times rr}{\hat{\lambda}^{(NT)}_{ik}\times N_{ik}}=\frac{n^{(OD,F)}_{ik}}{\hat{\lambda}^{(NT)}_{ik}\times N_{ik}}-p^{(Tb)}_{ik}\times rr - \hat{p}^{(To)}_{ik}\times rr.$$
+
+-   step 5: Assumptions: $\tau^{(D,M,T)}_{ik} =\tau^{(D,NM,T)}_{ik}=\tau^{(T)}_{ik}$ and $\tau^{(T)}_{ik} = \tau^{(Tb)}_{ik}+\tau^{(To)}_{ik}$
+
+$$\hat{n}_{ik}^{(D, NM, NT)} = \hat{n}_{ik}^{(D, NM)} (1-\tau_{ik}^{(T)})=\hat{n}_{ik}^{(D, NM)} (1-\tau_{ik}^{(T)})$$
+
+-   step 6: $$\hat{n}^{(U)}_{ik} = \hat{p}^{(U)}_{ik} \times N_{ik} = N_{ik}\times \hat{p}_{ik}^{(NT)} - \hat{n}_{ik}^{(D, NM, NT)}- n_{ik}^{(D,M)}\times (1-\tau_{ik}^{(T)})$$
+
+-   step 7: $$\hat{p}_{ik}^{OUD} = \frac{n_{ik}^{(D,M)}+\hat{n}_{ik}^{(D, NM)}+\hat{n}_{ik}^{(U)}}{N_{ik}}$$
+
+```{r libraries loading}
+library(tidyverse)
+library(ggplot2)
+```
+
+# step 1
+
+import dataset and lambda_hat
+
+```{r}
+input_df <- readRDS("input_data_norm.rds")
+
+input_df <- input_df %>%
+  mutate(p_DMTb_to_T = ifelse(is.na(p_DMTb_to_T),0,p_DMTb_to_T))
+
+# view(input_df)
+```
+
+# step 2
+
+$$\hat{n}_{ik}^{(D, NM)}=\hat{p}_{ik}^{(D, NM)}\times N_{ik} = \frac{n_{ik}^{(Tb)}}{\tau_{ik}^{(Tb)}} - n_{ik}^{(D,M)}$$
+
+```{R}
+# tau_Tb = p_DMT * p_DMTb_to_T
+
+# n_DNM = p_Tb * Population / tau_Tb - p_DM * Population
+
+step2 <- input_df %>%
+  mutate(tau_Tb =p_DMT*p_DMTb_to_T) %>%
+  mutate(tau_Tb = ifelse(tau_Tb==0, 0.01, tau_Tb))%>%
+  mutate(n_DNM = p_Tb * Population/tau_Tb - p_DM*Population) %>%
+  mutate(n_DNM = ifelse(n_DNM<0,0,n_DNM))
+
+# view(step2)
+```
+
+# step 3
+
+$$\hat{p}^{(To)}_{ik} = \frac{\hat{n}^{(To)}_{ik}}{N_{ik}} = (p^{(D,M)}_{ik}+\hat{p}_{ik}^{(D, NM)})\times \tau^{(To)}_{ik}$$
+
+```{r}
+# tau_To = p_DMT*(1-p_DMTb_to_T)
+# p_To = (p_DM+p_DNM) * tau_To
+# p_DNM = n_DNM/Population
+
+step3 <- step2 %>%
+  mutate(tau_To = p_DMT*(1-p_DMTb_to_T)) %>%
+  mutate(p_DNM = n_DNM/Population) %>%
+  mutate(p_To = (p_DM+p_DNM) * tau_To)
+
+# view(step3)
+
+```
+
+# step 4
+
+$$\hat{p}_{ik}^{(NT)}=\frac{n^{(OD,F)}_{ik}-n^{(Tb)}_{ik}\times \hat{\lambda}^{(NT)}_{ik}\times rr - \hat{n}^{(To)}_{ik}\times \hat{\lambda}^{(NT)}_{ik}\times rr}{\hat{\lambda}^{(NT)}_{ik}\times N_{ik}}=\frac{n^{(OD,F)}_{ik}}{\hat{\lambda}^{(NT)}_{ik}\times N_{ik}}-p^{(Tb)}_{ik}\times rr - \hat{p}^{(To)}_{ik}\times rr.$$
+
+```{R}
+# head(step3)
+# p_NT = n_ODF/ (lambda*Population) - p_Tb*rr - p_To*rr
+rr = 0.5
+step4 <- step3 %>%
+  mutate(p_NT = n_ODF/ (lambda*Population) - p_Tb*rr - p_To*rr)%>%
+  mutate(n_NT = p_NT*Population) %>%
+  mutate(n_NT = ifelse(n_NT>Population,Population,n_NT))%>%
+  mutate(n_NT = ifelse(n_NT<0,0,n_NT))%>%
+  mutate(p_NT = n_NT/Population)
+
+# view(step4)
+```
+
+# step 5
+
+$$\hat{n}_{ik}^{(D, NM, NT)} = \hat{n}_{ik}^{(D, NM)} (1-\tau_{ik}^{(T)})=\hat{n}_{ik}^{(D, NM)} (1-\tau_{ik}^{(T)})$$
+
+```{r}
+# n_DNMNT = n_DNM*(1-p_DMT)
+step5 <- step4 %>%
+  mutate(n_DNMNT= n_DNM*(1-p_DMT))
+
+# view(step5)
+```
+
+# step 6
+
+$$\hat{n}^{(U)}_{ik} = \hat{p}^{(U)}_{ik} \times N_{ik} = N_{ik}\times \hat{p}_{ik}^{(NT)} - \hat{n}_{ik}^{(D, NM, NT)}- n_{ik}^{(D,M)}\times (1-\tau_{ik}^{(T)})$$
+
+```{r}
+# n_U = Population * p_NT - n_DNMNT - p_DM *Population * (1-p_DMT)
+# 
+
+step6 <- step5 %>%
+  mutate(n_U = Population * p_NT - n_DNMNT - p_DM *Population * (1-p_DMT))%>%
+  mutate(n_U = ifelse(n_U<0,0,n_U)) %>%
+  mutate(p_U = n_U/Population)
+
+# view(step6)
+```
+
+# step 7
+
+$$\hat{p}_{ik}^{OUD} = \frac{n_{ik}^{(D,M)}+\hat{n}_{ik}^{(D, NM)}+\hat{n}_{ik}^{(U)}}{N_{ik}}$$
+
+```{r}
+step7 <- step6 %>%
+  mutate(p_OUD = p_DM + p_DNM + p_U)
+
+# View(step7)
+```
+
+```{r}
+final_res <- step7 %>%
+  group_by(Community,Year) %>%
+  summarise(population = sum(Population),
+            n_OUD_county = sum(Population*p_OUD))%>%
+  ungroup() %>%
+  mutate(prop_oud = n_OUD_county/population)
+
+# View(final_res)
+```
+
+```{R}
+saveRDS(final_res,"sim_est_0.5.rds")
+
+```
